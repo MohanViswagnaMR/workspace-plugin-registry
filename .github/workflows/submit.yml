@@ -1,0 +1,80 @@
+# Automated plugin submission: parse the issue's repo URL, test the plugin at
+# its current commit, and on success commit an index entry (link + pinned SHA
+# only — never the plugin's code) and rebuild index.json.
+name: submit
+on:
+  issues:
+    types: [opened, edited]
+permissions:
+  contents: write
+  issues: write
+concurrency:
+  group: registry-write
+  cancel-in-progress: false
+jobs:
+  test-and-index:
+    if: contains(github.event.issue.labels.*.name, 'plugin-submission')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install --no-audit --no-fund
+      - name: Extract repo URL from issue
+        id: url
+        env: { BODY: "${{ github.event.issue.body }}" }
+        run: |
+          URL=$(printf '%s' "$BODY" | grep -oiE '(https?://)?(www\.)?github\.com/[^ )"'"'"']+' | head -1 || true)
+          if [ -z "$URL" ]; then echo "found=false" >> "$GITHUB_OUTPUT";
+          else echo "found=true" >> "$GITHUB_OUTPUT"; echo "url=$URL" >> "$GITHUB_OUTPUT"; fi
+      - name: No URL found
+        if: steps.url.outputs.found == 'false'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number,
+              body: '❌ Could not find a github.com link in the issue. Edit the issue with your plugin repository URL to re-run.' });
+      - name: Validate plugin
+        if: steps.url.outputs.found == 'true'
+        id: validate
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          set +e
+          REPORT=$(node scripts/validate.js "${{ steps.url.outputs.url }}")
+          CODE=$?
+          echo "report<<EOF" >> "$GITHUB_OUTPUT"; echo "$REPORT" >> "$GITHUB_OUTPUT"; echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "ok=$([ $CODE -eq 0 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
+      - name: Write entry + rebuild index
+        if: steps.url.outputs.found == 'true' && steps.validate.outputs.ok == 'true'
+        env:
+          REPORT: "${{ steps.validate.outputs.report }}"
+          SUBMITTER: "${{ github.event.issue.user.login }}"
+        run: |
+          node - <<'EOF'
+          const { writeFileSync } = require('fs');
+          const r = JSON.parse(process.env.REPORT);
+          const entry = { id: r.id, ...r.manifest, repo: r.repo, path: r.path, ref: r.sha,
+            submittedBy: process.env.SUBMITTER, testedAt: new Date().toISOString(),
+            latestOk: true, verified: false };
+          writeFileSync(`plugins/${r.id}.json`, JSON.stringify(entry, null, 2) + '\n');
+          EOF
+          node scripts/build-index.js
+          git config user.name 'registry-bot'; git config user.email 'bot@users.noreply.github.com'
+          git add plugins index.json
+          git commit -m "Index plugin from #${{ github.event.issue.number }}" && git push
+      - name: Report result on the issue
+        if: steps.url.outputs.found == 'true'
+        uses: actions/github-script@v7
+        env: { REPORT: "${{ steps.validate.outputs.report }}" }
+        with:
+          script: |
+            let r = null; try { r = JSON.parse(process.env.REPORT); } catch (_) {}
+            const ok = '${{ steps.validate.outputs.ok }}' === 'true';
+            const checks = r ? r.checks.map(c => `${c.pass ? '✅' : '❌'} ${c.label}${c.detail ? ' — ' + c.detail : ''}`).join('\n') : 'validation crashed — check the workflow log';
+            const body = ok
+              ? `✅ **${r.manifest.name}** passed all checks and is now indexed at commit \`${r.sha.slice(0,10)}\`.\n\n${checks}\n\nIt will appear in the app's plugin search shortly. Pushing new commits? Re-submit to advance the tested pin (a weekly re-test also runs).`
+              : `❌ The plugin did not pass the automated tests:\n\n${checks}\n\nFix the issues and open a new submission (or edit this issue to re-run).`;
+            await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            await github.rest.issues.update({ ...context.repo, issue_number: context.issue.number, state: 'closed',
+              state_reason: ok ? 'completed' : 'not_planned' });

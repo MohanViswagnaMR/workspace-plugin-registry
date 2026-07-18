@@ -1,0 +1,51 @@
+# Weekly re-test: advance each plugin's tested pin to its latest commit when it
+# still passes; keep the last good pin (and flag latestOk:false) when it doesn't.
+name: revalidate
+on:
+  schedule: [{ cron: "17 4 * * 1" }]
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: registry-write
+  cancel-in-progress: false
+jobs:
+  revalidate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { ref: main }
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: npm install --no-audit --no-fund
+      - name: Re-test every indexed plugin at HEAD
+        env: { GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}" }
+        run: |
+          node - <<'EOF'
+          const { readdirSync, readFileSync, writeFileSync } = require('fs');
+          const { execFileSync } = require('child_process');
+          for (const f of readdirSync('plugins')) {
+            if (!f.endsWith('.json')) continue;
+            const p = `plugins/${f}`;
+            const entry = JSON.parse(readFileSync(p, 'utf8'));
+            const url = `github.com/${entry.repo}` + (entry.path ? `/tree/HEAD/${entry.path}` : '');
+            let report = null, ok = false;
+            try {
+              const out = execFileSync('node', ['scripts/validate.js', `github.com/${entry.repo}${entry.path ? '/tree/HEAD/' + entry.path : ''}`],
+                { encoding: 'utf8', env: process.env });
+              report = JSON.parse(out.trim().split('\n').pop()); ok = report.ok;
+            } catch (e) { try { report = JSON.parse(String(e.stdout || '').trim().split('\n').pop()); } catch (_) {} }
+            if (ok && report.sha !== entry.ref) {
+              Object.assign(entry, { ref: report.sha, ...report.manifest, testedAt: new Date().toISOString(), latestOk: true });
+              console.log(`${entry.id}: advanced to ${report.sha.slice(0,10)}`);
+            } else if (!ok && entry.latestOk !== false) {
+              entry.latestOk = false;   // last good pin keeps serving
+              console.log(`${entry.id}: HEAD fails — keeping pinned ${String(entry.ref).slice(0,10)}`);
+            } else { continue; }
+            writeFileSync(p, JSON.stringify(entry, null, 2) + '\n');
+          }
+          EOF
+          node scripts/build-index.js
+          git config user.name 'registry-bot'; git config user.email 'bot@users.noreply.github.com'
+          git add plugins index.json
+          git diff --cached --quiet || { git commit -m 'Weekly revalidation'; git push; }
