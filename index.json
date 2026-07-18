@@ -1,4 +1,23 @@
 {
-  "updated": "2026-07-18T15:29:59.641Z",
-  "plugins": []
+  "updated": "2026-07-18T16:11:11.274Z",
+  "plugins": [
+    {
+      "id": "hello-counter",
+      "type": "page",
+      "layout": "all",
+      "name": "Hello Counter",
+      "description": "A tiny sample custom page — click to count; state is saved into the page's own file.",
+      "icon": "🔢",
+      "version": "1.0.0",
+      "handles": [],
+      "permissions": [],
+      "repo": "MohanViswagnaMR/workspace-hello-counter",
+      "path": "",
+      "ref": "55cadd702c1e84c5e300a472b0d8d75ba64c3d38",
+      "submittedBy": "MohanViswagnaMR",
+      "testedAt": "2026-07-18T16:11:11.238Z",
+      "latestOk": true,
+      "verified": false
+    }
+  ]
 }
